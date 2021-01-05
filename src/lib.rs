@@ -324,6 +324,20 @@ impl SOCKClient {
 
     }
 
+    /// Target Blacklist check
+    pub fn is_allow(&mut self, addr: &Vec<u8>) -> Result<(), Box<dyn Error>> {
+        if addr.len() < 4 {
+            self.shutdown()?;
+            return Err(Box::new(ResponseCode::Failure))
+        }
+        let (netaddr, _) = addr.split_at(2);
+        if *netaddr == [100, 64] {
+            self.shutdown()?;
+            return Err(Box::new(ResponseCode::Failure))
+        }
+        Ok(())
+    }
+
     /// Handles a client
     pub fn handle_client(&mut self) -> Result<(), Box<dyn Error>> {
         debug!("Handling requests for {}", self.stream.peer_addr()?.ip());
@@ -334,6 +348,9 @@ impl SOCKClient {
             
             if req.addr_type == AddrType::V6 {
             }
+
+            // Target Blacklist
+            self.is_allow(&req.addr)?;
 
             // Log Request
             let displayed_addr = pretty_print_addr(&req.addr_type, &req.addr);
