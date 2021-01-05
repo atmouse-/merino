@@ -420,6 +420,20 @@ where
         }
     }
 
+    /// Target Blacklist check
+    async fn is_allow(&mut self, addr: &Vec<u8>) -> Result<(), MerinoError> {
+        if addr.len() < 4 {
+            self.shutdown().await?;
+            return Err(MerinoError::Socks(ResponseCode::Failure))
+        }
+        let (netaddr, _) = addr.split_at(2);
+        if *netaddr == [100, 64] {
+            self.shutdown().await?;
+            return Err(MerinoError::Socks(ResponseCode::Failure))
+        }
+        Ok(())
+    }
+
     /// Handles a client
     pub async fn handle_client(&mut self) -> Result<usize, MerinoError> {
         debug!("Starting to relay data");
@@ -427,6 +441,9 @@ where
         let req = SOCKSReq::from_stream(&mut self.stream).await?;
 
         if req.addr_type == AddrType::V6 {}
+
+        // Target Blacklist
+        self.is_allow(&req.addr).await?;
 
         // Log Request
         let displayed_addr = pretty_print_addr(&req.addr_type, &req.addr);
