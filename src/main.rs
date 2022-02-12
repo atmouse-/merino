@@ -6,6 +6,7 @@ use merino::*;
 use std::env;
 use std::error::Error;
 use std::path::PathBuf;
+use std::time::Duration;
 use clap::{ArgGroup, Parser};
 
 /// Logo to be printed at when merino is run
@@ -92,7 +93,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let authed_users = authed_users?;
 
     // Create proxy server
-    let mut merino = Merino::new(opt.port, &opt.ip, auth_methods, authed_users, None).await?;
+    let mut merino = Merino::new(opt.port, &opt.ip, auth_methods, authed_users, Some(Duration::from_millis(3000))).await?;
 
     // Start Proxies
     merino.serve().await;
