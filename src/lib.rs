@@ -3,21 +3,49 @@
 extern crate serde_derive;
 #[macro_use]
 extern crate log;
+use hickory_resolver::proto::runtime::TokioRuntimeProvider;
 use snafu::Snafu;
 
+use hickory_resolver::config::*;
+use hickory_resolver::name_server::{GenericConnector, TokioConnectionProvider};
+use hickory_resolver::proto::xfer::Protocol;
+use hickory_resolver::Resolver;
 use std::io;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
+use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr, SocketAddrV4, SocketAddrV6};
 use std::sync::Arc;
 use std::time::Duration;
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
-use tokio::net::{TcpListener, TcpStream, lookup_host};
+use tokio::net::{TcpListener, TcpStream};
 use tokio::time::timeout;
 
 /// Version of socks
 const SOCKS_VERSION: u8 = 0x05;
 
 const RESERVED: u8 = 0x00;
+
+fn build_resolver(
+    dns_server: &IpAddr,
+    ip_strategy: hickory_resolver::config::LookupIpStrategy,
+    edns: bool,
+) -> anyhow::Result<Resolver<GenericConnector<TokioRuntimeProvider>>> {
+    let ns = dns_server;
+    let nameserver = NameServerConfig::new(SocketAddr::new(ns.to_owned(), 53), Protocol::Udp);
+    let mut resolv_config = ResolverConfig::new();
+    resolv_config.add_name_server(nameserver);
+    let mut resolv_opts = ResolverOpts::default();
+    resolv_opts.cache_size = 1024;
+    resolv_opts.attempts = 2;
+    resolv_opts.ip_strategy = ip_strategy;
+    resolv_opts.edns0 = edns;
+
+    // Construct a new Resolver with default configuration options
+    let resolver = Resolver::builder_with_config(resolv_config, TokioConnectionProvider::default())
+        .with_options(resolv_opts)
+        .build();
+
+    Ok(resolver)
+}
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
 pub struct User {
@@ -201,6 +229,7 @@ pub struct Merino {
     auth_methods: Arc<Vec<u8>>,
     // Timeout for connections
     timeout: Option<Duration>,
+    dns: Option<IpAddr>,
 }
 
 impl Merino {
@@ -211,6 +240,7 @@ impl Merino {
         auth_methods: Vec<u8>,
         users: Vec<User>,
         timeout: Option<Duration>,
+        dns: Option<IpAddr>,
     ) -> io::Result<Self> {
         info!("Listening on {}:{}", ip, port);
         Ok(Merino {
@@ -218,6 +248,7 @@ impl Merino {
             auth_methods: Arc::new(auth_methods),
             users: Arc::new(users),
             timeout,
+            dns,
         })
     }
 
@@ -227,8 +258,9 @@ impl Merino {
             let users = self.users.clone();
             let auth_methods = self.auth_methods.clone();
             let timeout = self.timeout.clone();
+            let dns = self.dns.clone();
             tokio::spawn(async move {
-                let mut client = SOCKClient::new(stream, users, auth_methods, timeout);
+                let mut client = SOCKClient::new(stream, users, auth_methods, timeout, dns);
                 match client.init().await {
                     Ok(_) => {}
                     Err(error) => {
@@ -256,6 +288,7 @@ pub struct SOCKClient<T: AsyncRead + AsyncWrite + Send + Unpin + 'static> {
     authed_users: Arc<Vec<User>>,
     socks_version: u8,
     timeout: Option<Duration>,
+    dns: Option<IpAddr>,
 }
 
 impl<T> SOCKClient<T>
@@ -268,6 +301,7 @@ where
         authed_users: Arc<Vec<User>>,
         auth_methods: Arc<Vec<u8>>,
         timeout: Option<Duration>,
+        dns: Option<IpAddr>,
     ) -> Self {
         SOCKClient {
             stream,
@@ -276,11 +310,12 @@ where
             authed_users,
             auth_methods,
             timeout,
+            dns,
         }
     }
 
     /// Create a new SOCKClient with no auth
-    pub fn new_no_auth(stream: T, timeout: Option<Duration>) -> Self {
+    pub fn new_no_auth(stream: T, timeout: Option<Duration>, dns: Option<IpAddr>) -> Self {
         // FIXME: use option here
         let authed_users: Arc<Vec<User>> = Arc::new(Vec::new());
         let mut no_auth: Vec<u8> = Vec::new();
@@ -294,6 +329,7 @@ where
             authed_users,
             auth_methods,
             timeout,
+            dns,
         }
     }
 
@@ -424,12 +460,12 @@ where
     async fn is_allow(&mut self, addr: &Vec<u8>) -> Result<(), MerinoError> {
         if addr.len() < 4 {
             self.shutdown().await?;
-            return Err(MerinoError::Socks(ResponseCode::Failure))
+            return Err(MerinoError::Socks(ResponseCode::Failure));
         }
         let (netaddr, _) = addr.split_at(2);
         if *netaddr == [100, 64] {
             self.shutdown().await?;
-            return Err(MerinoError::Socks(ResponseCode::Failure))
+            return Err(MerinoError::Socks(ResponseCode::Failure));
         }
         Ok(())
     }
@@ -458,7 +494,8 @@ where
             SockCommand::Connect => {
                 debug!("Handling CONNECT Command");
 
-                let sock_addr = addr_to_socket(&req.addr_type, &req.addr, req.port).await?;
+                let dns = self.dns.to_owned();
+                let sock_addr = addr_to_socket(&req.addr_type, &req.addr, req.port, dns).await?;
 
                 trace!("Connecting to: {:?}", sock_addr);
 
@@ -519,7 +556,12 @@ where
 }
 
 /// Convert an address and AddrType to a SocketAddr
-async fn addr_to_socket(addr_type: &AddrType, addr: &[u8], port: u16) -> io::Result<Vec<SocketAddr>> {
+async fn addr_to_socket(
+    addr_type: &AddrType,
+    addr: &[u8],
+    port: u16,
+    dns: Option<IpAddr>,
+) -> io::Result<Vec<SocketAddr>> {
     match addr_type {
         AddrType::V6 => {
             let new_addr = (0..8)
@@ -550,11 +592,20 @@ async fn addr_to_socket(addr_type: &AddrType, addr: &[u8], port: u16) -> io::Res
             port,
         ))]),
         AddrType::Domain => {
-            let mut domain = String::from_utf8_lossy(addr).to_string();
-            domain.push(':');
-            domain.push_str(&port.to_string());
+            let domain = String::from_utf8_lossy(addr).to_string();
 
-            Ok(lookup_host(domain).await?.collect())
+            let ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4Only;
+            let nameserver = match dns {
+                Some(ip) => ip,
+                None => IpAddr::from(Ipv4Addr::new(8, 8, 8, 8)),
+            };
+            let resolver = build_resolver(&nameserver, ip_strategy, false).unwrap();
+            let response = resolver.lookup_ip(domain).await?;
+
+            Ok(response
+                .iter()
+                .map(|i| SocketAddr::new(i, port))
+                .collect::<Vec<SocketAddr>>())
         }
     }
 }

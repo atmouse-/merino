@@ -8,6 +8,7 @@ use clap::{ArgGroup, Parser};
 use merino::*;
 use std::env;
 use std::error::Error;
+use std::net::IpAddr;
 use std::os::unix::prelude::MetadataExt;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -45,6 +46,10 @@ struct Opt {
     #[clap(long)]
     /// Allow insecure configuration
     allow_insecure: bool,
+
+    #[clap(long)]
+    /// nameserver specific
+    dns: Option<IpAddr>,
 
     #[clap(long)]
     /// Allow unauthenticated connections
@@ -156,7 +161,15 @@ async fn main() -> Result<(), Box<dyn Error>> {
     let authed_users = authed_users?;
 
     // Create proxy server
-    let mut merino = Merino::new(opt.port, &opt.ip, auth_methods, authed_users, Some(Duration::from_millis(3000))).await?;
+    let mut merino = Merino::new(
+        opt.port,
+        &opt.ip,
+        auth_methods,
+        authed_users,
+        Some(Duration::from_millis(3000)),
+        opt.dns,
+    )
+    .await?;
 
     // Start Proxies
     merino.serve().await;

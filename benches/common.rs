@@ -1,8 +1,8 @@
 #![feature(test)]
 extern crate test;
 
-use test::{Bencher, black_box};
 use merino::*;
+use test::{black_box, Bencher};
 
 #[bench]
 fn bench_pow(b: &mut Bencher) {
