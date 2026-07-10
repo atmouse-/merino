@@ -24,6 +24,13 @@ const SOCKS_VERSION: u8 = 0x05;
 
 const RESERVED: u8 = 0x00;
 
+fn is_ip_allow(ip: &IpAddr, allow_ips_only: &Vec<IpAddr>) -> bool {
+    if allow_ips_only.contains(ip) {
+        return true;
+    }
+    false
+}
+
 fn build_resolver(
     dns_server: Option<IpAddr>,
     ip_strategy: hickory_resolver::config::LookupIpStrategy,
@@ -233,6 +240,7 @@ pub struct Merino {
     listener: TcpListener,
     users: Arc<Vec<User>>,
     auth_methods: Arc<Vec<u8>>,
+    allow_ips_only: Vec<IpAddr>,
     // Timeout for connections
     timeout: Option<Duration>,
     dns: Option<IpAddr>,
@@ -245,6 +253,7 @@ impl Merino {
         ip: &str,
         auth_methods: Vec<u8>,
         users: Vec<User>,
+        allow_ips_only: Vec<IpAddr>,
         timeout: Option<Duration>,
         dns: Option<IpAddr>,
     ) -> io::Result<Self> {
@@ -253,6 +262,7 @@ impl Merino {
             listener: TcpListener::bind((ip, port)).await?,
             auth_methods: Arc::new(auth_methods),
             users: Arc::new(users),
+            allow_ips_only,
             timeout,
             dns,
         })
@@ -265,6 +275,13 @@ impl Merino {
             let auth_methods = self.auth_methods.clone();
             let timeout = self.timeout.clone();
             let dns = self.dns.clone();
+
+            let client_ip = client_addr.ip();
+            if !self.allow_ips_only.is_empty() && !is_ip_allow(&client_ip, &self.allow_ips_only) {
+                // reject
+                warn!("Reject connection from {}", &client_addr);
+                continue;
+            }
             tokio::spawn(async move {
                 let mut client = SOCKClient::new(stream, users, auth_methods, timeout, dns);
                 match client.init().await {

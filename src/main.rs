@@ -59,6 +59,10 @@ struct Opt {
     /// CSV File with username/password pairs
     users: Option<PathBuf>,
 
+    #[clap(long)]
+    /// allow this ips incoming only
+    allow_ips_only: Vec<IpAddr>,
+
     /// Log verbosity level. -vv for more verbosity.
     /// Environmental variable `RUST_LOG` overrides this flag!
     #[clap(short, parse(from_occurrences))]
@@ -106,6 +110,9 @@ async fn main() -> Result<(), Box<dyn Error>> {
     if opt.no_auth {
         auth_methods.push(merino::AuthMethods::NoAuth as u8);
     }
+
+    // Allow this incoming ips only
+    let allow_ips_only = opt.allow_ips_only;
 
     // Enable username/password auth
     let authed_users: Result<Vec<User>, Box<dyn Error>> = match opt.users {
@@ -166,6 +173,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
         &opt.ip,
         auth_methods,
         authed_users,
+        allow_ips_only,
         Some(Duration::from_millis(3000)),
         opt.dns,
     )
