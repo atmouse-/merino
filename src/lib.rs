@@ -25,26 +25,32 @@ const SOCKS_VERSION: u8 = 0x05;
 const RESERVED: u8 = 0x00;
 
 fn build_resolver(
-    dns_server: &IpAddr,
+    dns_server: Option<IpAddr>,
     ip_strategy: hickory_resolver::config::LookupIpStrategy,
     edns: bool,
 ) -> anyhow::Result<Resolver<GenericConnector<TokioRuntimeProvider>>> {
-    let ns = dns_server;
-    let nameserver = NameServerConfig::new(SocketAddr::new(ns.to_owned(), 53), Protocol::Udp);
-    let mut resolv_config = ResolverConfig::new();
-    resolv_config.add_name_server(nameserver);
     let mut resolv_opts = ResolverOpts::default();
     resolv_opts.cache_size = 1024;
     resolv_opts.attempts = 2;
     resolv_opts.ip_strategy = ip_strategy;
     resolv_opts.edns0 = edns;
 
-    // Construct a new Resolver with default configuration options
-    let resolver = Resolver::builder_with_config(resolv_config, TokioConnectionProvider::default())
-        .with_options(resolv_opts)
-        .build();
+    if let Some(ns) = dns_server {
+        let nameserver = NameServerConfig::new(SocketAddr::new(ns.to_owned(), 53), Protocol::Udp);
+        let mut resolv_config = ResolverConfig::new();
+        resolv_config.add_name_server(nameserver);
 
-    Ok(resolver)
+        // Construct a new Resolver with default configuration options
+        let resolver =
+            Resolver::builder_with_config(resolv_config, TokioConnectionProvider::default())
+                .with_options(resolv_opts)
+                .build();
+
+        Ok(resolver)
+    } else {
+        let resolver = Resolver::builder_tokio()?.with_options(resolv_opts).build();
+        Ok(resolver)
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Deserialize)]
@@ -595,11 +601,7 @@ async fn addr_to_socket(
             let domain = String::from_utf8_lossy(addr).to_string();
 
             let ip_strategy = hickory_resolver::config::LookupIpStrategy::Ipv4Only;
-            let nameserver = match dns {
-                Some(ip) => ip,
-                None => IpAddr::from(Ipv4Addr::new(8, 8, 8, 8)),
-            };
-            let resolver = build_resolver(&nameserver, ip_strategy, false).unwrap();
+            let resolver = build_resolver(dns, ip_strategy, false).unwrap();
             let response = resolver.lookup_ip(domain).await?;
 
             Ok(response
